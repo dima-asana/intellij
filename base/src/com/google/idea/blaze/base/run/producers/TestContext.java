@@ -34,6 +34,7 @@ import com.google.idea.blaze.base.run.state.RunConfigurationFlagsState;
 import com.google.idea.blaze.base.settings.Blaze;
 import com.intellij.execution.RunCanceledByUserException;
 import com.intellij.execution.runners.ExecutionEnvironment;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.progress.PerformInBackgroundOption;
 import com.intellij.openapi.progress.impl.BackgroundableProcessIndicator;
@@ -47,6 +48,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import javax.annotation.Nullable;
+import org.jetbrains.ide.PooledThreadExecutor;
 
 /** A context related to a blaze test target, used to configure a run configuration. */
 public abstract class TestContext implements RunConfigurationContext {
@@ -55,7 +57,7 @@ public abstract class TestContext implements RunConfigurationContext {
   final ImmutableList<BlazeFlagsModification> blazeFlags;
   @Nullable final String description;
 
-  private TestContext(
+  TestContext(
       PsiElement sourceElement,
       ImmutableList<BlazeFlagsModification> blazeFlags,
       @Nullable String description) {
@@ -120,10 +122,10 @@ public abstract class TestContext implements RunConfigurationContext {
   /** Returns true if the run configuration target matches this {@link TestContext}. */
   abstract boolean matchesTarget(BlazeCommandRunConfiguration config);
 
-  private static class KnownTargetTestContext extends TestContext {
+  static class KnownTargetTestContext extends TestContext {
     final TargetInfo target;
 
-    private KnownTargetTestContext(
+    KnownTargetTestContext(
         TargetInfo target,
         PsiElement sourceElement,
         ImmutableList<BlazeFlagsModification> blazeFlags,
@@ -171,9 +173,16 @@ public abstract class TestContext implements RunConfigurationContext {
                   return new FailedPendingRunConfiguration(
                       sourceElement, String.format("No %s target found.", buildSystem));
                 }
-                return new KnownTargetTestContext(t, sourceElement, blazeFlags, description);
+                RunConfigurationContext context =
+                    PendingWebTestContext.findWebTestContext(
+                        supportedExecutors, t, sourceElement, blazeFlags, description);
+                return context != null
+                    ? context
+                    : new KnownTargetTestContext(t, sourceElement, blazeFlags, description);
               },
-              MoreExecutors.directExecutor());
+              ApplicationManager.getApplication().isUnitTestMode()
+                  ? MoreExecutors.directExecutor()
+                  : PooledThreadExecutor.INSTANCE);
       return new PendingAsyncTestContext(
           supportedExecutors, future, progressMessage, sourceElement, blazeFlags, description);
     }
@@ -230,7 +239,9 @@ public abstract class TestContext implements RunConfigurationContext {
         RunConfigurationContext context = getFutureHandlingErrors();
         boolean success = context.setupRunConfiguration(config);
         if (success) {
-          config.clearPendingContext();
+          if (config.getPendingContext() == this) {
+            config.clearPendingContext();
+          }
           return true;
         }
       } catch (RunCanceledByUserException | NoRunConfigurationFoundException e) {
